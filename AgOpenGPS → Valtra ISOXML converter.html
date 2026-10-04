@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>AgOpenGPS → Valtra ISOXML</title>
+<style>
+:root{--bg:#f6f7f4;--card:#fff;--ink:#1d2a1f;--mut:#667366;--acc:#c8102e;--ok:#1b7a3a;--bd:#dde2da;
+box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#121612;--card:#1b211b;--ink:#e8efe8;--mut:#9aa89a;--acc:#ff5a6e;--ok:#5ad17f;--bd:#2f382f}}
+:root[data-theme="dark"]{--bg:#121612;--card:#1b211b;--ink:#e8efe8;--mut:#9aa89a;--acc:#ff5a6e;--ok:#5ad17f;--bd:#2f382f}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+main{max-width:760px;margin:0 auto;padding:24px 16px 48px}
+h1{font-size:1.5rem;margin:0 0 4px}
+p.sub{color:var(--mut);margin:0 0 20px}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:16px;margin-bottom:16px}
+#drop{border:2px dashed var(--bd);border-radius:12px;padding:32px 16px;text-align:center;cursor:pointer}
+#drop.over{border-color:var(--acc)}
+#drop b{display:block;margin-bottom:4px}
+.row{display:flex;gap:16px;flex-wrap:wrap;align-items:center;margin-top:12px}
+label{display:flex;gap:6px;align-items:center}
+button{background:var(--acc);color:#fff;border:0;border-radius:8px;padding:10px 18px;font:inherit;font-weight:600;cursor:pointer}
+button:disabled{opacity:.4;cursor:not-allowed}
+.tbl{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:.9rem}
+th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--bd);white-space:nowrap}
+.num{text-align:right}
+.mut{color:var(--mut)}
+.ok{color:var(--ok)}
+#msg{min-height:1.4em;margin-top:8px}
+ul{margin:8px 0 0;padding-left:20px;color:var(--mut);font-size:.92rem}
+</style>
+</head>
+<body>
+<main>
+<h1>AgOpenGPS → Valtra ISOXML</h1>
+<p class="sub">Fixes AgOpenGPS exports so a Valtra SmartTouch / Valtra Guide terminal can import them. Everything runs in your browser; nothing is uploaded.</p>
+
+<div class="card">
+  <div id="drop" tabindex="0"><b>Drop Fields.zip here, or click to choose</b><span class="mut">Zip of AgOpenGPS field folders (each with a zISOXML folder). A single TASKDATA.xml also works.</span></div>
+  <input id="file" type="file" accept=".zip,.xml" hidden>
+  <div class="row">
+    <label>ISOXML version
+      <select id="ver"><option value="4">v4 (try first)</option><option value="3">v3 (older, no curves)</option></select>
+    </label>
+    <label><input type="checkbox" id="per" checked> also one folder per field</label>
+  </div>
+  <div id="msg" class="mut">No file loaded.</div>
+</div>
+
+<div class="card" id="res" hidden>
+  <div class="tbl"><table>
+    <thead><tr><th>Field</th><th class="num">Boundary pts</th><th class="num">AB lines</th><th class="num">Curves</th><th class="num">Empty removed</th></tr></thead>
+    <tbody id="rows"></tbody>
+  </table></div>
+  <div class="row"><button id="dl">Download Valtra-ready zip</button><span id="dlmsg" class="mut"></span></div>
+  <ul>
+    <li>Copy the <b>TASKDATA</b> folder to the root of a FAT32 USB stick (file name must be uppercase TASKDATA.XML).</li>
+    <li>Fixed: decimal commas, invalid IDs, empty guidance entries, 9-decimal coordinates, BOM, non-ASCII names.</li>
+  </ul>
+</div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script>
+(function(){
+const $=id=>document.getElementById(id);
+let fields=[];            // [{name, xml(Document)}]
+let srcName='Fields';
+
+const esc=s=>s.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+function asciiName(s,max=32){
+  s=(s||'').replace(/\u00b0/g,'').normalize('NFKD').replace(/[^\x20-\x7e]/g,'').replace(/\s+/g,' ').trim();
+  return s.slice(0,max)||'Line';
+}
+function num(v){
+  const f=parseFloat(String(v).replace(',','.'));
+  return f.toFixed(9).replace(/0+$/,'').replace(/\.$/,'');
+}
+function pnt(p){
+  const a=p.getAttribute('A'),b=p.getAttribute('B');
+  return `<PNT A="${a}"${b?` B="${esc(b)}"`:''} C="${num(p.getAttribute('C'))}" D="${num(p.getAttribute('D'))}"/>`;
+}
+const kids=(el,tag)=>[...el.children].filter(c=>c.tagName===tag);
+
+// returns {xml, stats}; ids is a mutable counter object
+function convertField(f,ver,ids){
+  const pfdIn=f.doc.getElementsByTagName('PFD')[0];
+  ids.pfd++;
+  const st={name:f.name,bpts:0,ab:0,curve:0,dropped:0};
+  let o=`  <PFD A="PFD${ids.pfd}" C="${esc(asciiName(pfdIn.getAttribute('C')||f.name))}" D="${pfdIn.getAttribute('D')||0}">\n`;
+  for(const pln of kids(pfdIn,'PLN')){
+    o+=`    <PLN A="${pln.getAttribute('A')||1}">\n`;
+    for(const lsg of kids(pln,'LSG')){
+      o+=`      <LSG A="${lsg.getAttribute('A')||1}">\n`;
+      for(const p of kids(lsg,'PNT')){o+=`        ${pnt(p)}\n`;st.bpts++;}
+      o+=`      </LSG>\n`;
+    }
+    o+=`    </PLN>\n`;
+  }
+  if(ver==='4'){
+    for(const ggp of kids(pfdIn,'GGP')) for(const gpn of kids(ggp,'GPN')){
+      const l=kids(gpn,'LSG')[0], pts=l?kids(l,'PNT'):[];
+      if(pts.length<2){st.dropped++;continue;}
+      ids.ggp++;ids.gpn++;
+      const nm=esc(asciiName(gpn.getAttribute('B')||ggp.getAttribute('B')));
+      const t=gpn.getAttribute('C');
+      t==='3'?st.curve++:st.ab++;
+      o+=`    <GGP A="GGP${ids.ggp}" B="${nm}">\n      <GPN A="GPN${ids.gpn}" B="${nm}" C="${t}" E="${gpn.getAttribute('E')||1}" F="${gpn.getAttribute('F')||1}" I="${gpn.getAttribute('I')||16}">\n        <LSG A="5">\n`;
+      for(const p of pts)o+=`          ${pnt(p)}\n`;
+      o+=`        </LSG>\n      </GPN>\n    </GGP>\n`;
+    }
+  }else{
+    for(const l of kids(pfdIn,'LSG')){
+      const pts=kids(l,'PNT');
+      if(pts.length<2){st.dropped++;continue;}
+      st.ab++;
+      o+=`    <LSG A="5" B="${esc(asciiName(l.getAttribute('B')))}">\n`;
+      for(const p of pts)o+=`      ${pnt(p)}\n`;
+      o+=`    </LSG>\n`;
+    }
+  }
+  o+=`  </PFD>\n`;
+  return {xml:o,st};
+}
+function wrap(ver,body){
+  const minor=ver==='4'?'2':'3';
+  return `<?xml version="1.0" encoding="utf-8"?>\n<ISO11783_TaskData VersionMajor="${ver}" VersionMinor="${minor}" ManagementSoftwareManufacturer="AgOpenGPS" ManagementSoftwareVersion="1.4.0" DataTransferOrigin="1" DataTransferLanguage="en">\n${body}</ISO11783_TaskData>\n`;
+}
+
+function parse(text){
+  const d=new DOMParser().parseFromString(text.replace(/^\uFEFF/,''),'application/xml');
+  if(d.getElementsByTagName('parsererror').length||!d.getElementsByTagName('PFD').length)return null;
+  return d;
+}
+
+async function load(file){
+  fields=[];srcName=file.name.replace(/\.[^.]+$/,'');
+  $('res').hidden=true;
+  const ver=$('ver').value;
+  try{
+    if(/\.xml$/i.test(file.name)){
+      const d=parse(await file.text());
+      if(d)fields.push({name:d.getElementsByTagName('PFD')[0].getAttribute('C')||srcName,doc:d,vers:null});
+    }else{
+      const z=await JSZip.loadAsync(file);
+      const found={};
+      z.forEach((path,e)=>{
+        const m=path.match(/(?:^|\/)([^\/]+)\/zISOXML\/v([34])\/TASKDATA\.xml$/i)||path.match(/(?:^|\/)()zISOXML\/v([34])\/TASKDATA\.xml$/i);
+        if(m&&!e.dir){(found[m[1]||srcName]=found[m[1]||srcName]||{})[m[2]]=e;}
+      });
+      for(const name of Object.keys(found).sort((a,b)=>a.toLowerCase()<b.toLowerCase()?-1:1)){
+        const docs={};
+        for(const v of ['3','4']) if(found[name][v]){const d=parse(await found[name][v].async('string'));if(d)docs[v]=d;}
+        if(Object.keys(docs).length)fields.push({name,docs});
+      }
+    }
+  }catch(e){$('msg').textContent='Could not read that file: '+e.message;return;}
+  if(!fields.length){$('msg').textContent='No AgOpenGPS TASKDATA.xml files found in that file.';return;}
+  $('msg').textContent=`${fields.length} field${fields.length>1?'s':''} loaded. Converting…`;
+  preview();
+}
+const docFor=(f,ver)=>f.docs?(f.docs[ver]||f.docs[ver==='4'?'3':'4']):f.doc;
+
+function preview(){
+  if(!fields.length)return;
+  const ver=$('ver').value, ids={pfd:0,ggp:0,gpn:0};
+  let html='',tot=0;
+  for(const f of fields){
+    const {st}=convertField({name:f.name,doc:docFor(f,ver)},ver,ids);
+    tot+=st.dropped;
+    html+=`<tr><td>${esc(f.name)}</td><td class="num">${st.bpts||'<span class="mut">none</span>'}</td><td class="num">${st.ab}</td><td class="num">${st.curve}</td><td class="num">${st.dropped}</td></tr>`;
+  }
+  $('rows').innerHTML=html;
+  $('res').hidden=false;
+  $('msg').innerHTML=`<span class="ok">Ready:</span> ${fields.length} fields, ${tot} empty guidance entries removed.`;
+}
+
+async function build(){
+  const ver=$('ver').value, z=new JSZip(), base=`ISOXML_v${ver}/`;
+  let ids={pfd:0,ggp:0,gpn:0}, body='';
+  for(const f of fields){
+    const d=docFor(f,ver);
+    body+=convertField({name:f.name,doc:d},ver,ids).xml;
+    if($('per').checked){
+      const one=convertField({name:f.name,doc:d},ver,{pfd:0,ggp:0,gpn:0}).xml;
+      const safe=asciiName(f.name,60).replace(/[^A-Za-z0-9_.-]+/g,'_');
+      z.file(`${base}per_field/${safe}/TASKDATA/TASKDATA.XML`,wrap(ver,one));
+    }
+  }
+  z.file(`${base}all_fields/TASKDATA/TASKDATA.XML`,wrap(ver,body));
+  return z.generateAsync({type:'blob',compression:'DEFLATE'});
+}
+
+$('dl').onclick=async()=>{
+  $('dlmsg').textContent='Building…';
+  try{
+    const blob=await build();
+    const dls=window.claude?await claude.use('downloads'):null;
+    if(!dls){$('dlmsg').textContent='Saving is not available in this view. Open the page from your claude.ai artifact link.';return;}
+    await dls.save({filename:`Valtra_ready_v${$('ver').value}.zip`,data:blob});
+    $('dlmsg').textContent='Saved.';
+  }catch(e){$('dlmsg').textContent=e&&e.code==='declined'?'Download cancelled.':'Could not save: '+((e&&e.message)||e);}
+};
+
+const drop=$('drop'),inp=$('file');
+drop.onclick=()=>inp.click();
+drop.onkeydown=e=>{if(e.key==='Enter'||e.key===' ')inp.click();};
+inp.onchange=()=>inp.files[0]&&load(inp.files[0]);
+['dragenter','dragover'].forEach(t=>drop.addEventListener(t,e=>{e.preventDefault();drop.classList.add('over');}));
+['dragleave','drop'].forEach(t=>drop.addEventListener(t,e=>{e.preventDefault();drop.classList.remove('over');}));
+drop.addEventListener('drop',e=>e.dataTransfer.files[0]&&load(e.dataTransfer.files[0]));
+$('ver').onchange=preview;
+})();
+</script>
+</body>
+</html>
