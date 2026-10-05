@@ -86,7 +86,3 @@ Try v4 first; use v3 only if v4 is rejected. If the terminal still complains, ru
 | --- | --- |
 | `aog-to-valtra.html` | Browser converter (boundary estimation, curve handling) |
 | `aog_to_valtra.py` | Command-line converter (file fixes and merge only) |
-
-## License
-
-Choose a license for your repository (for example MIT) and add a `LICENSE` file.
